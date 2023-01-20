@@ -1,0 +1,177 @@
+---
+title: "blackfridaysales"
+author: "rishabhkansal"
+date: "2023-01-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      comment = '', 
+                      warning = FALSE, 
+                      message = FALSE)
+```
+
+```{r message=FALSE, warning=FALSE}
+options(digits = 3, scipen = 999)
+library(tidyverse)
+library(ISLR)
+library(jtools)
+library(caret)
+library(ROCR)
+library(e1071)
+library(glmnet)
+library(lmtest)
+library(rpart)
+library(rpart.plot)
+library(caTools)
+set.seed(2)
+rm(list=ls())
+train <- read.csv("train.csv")
+```
+
+```{r}
+col_names <- c("Gender","Age","Occupation","City_Category","Marital_Status","Stay_In_Current_City_Years")
+train[col_names] <- lapply(train[col_names], factor)
+```
+
+
+```{r}
+head(train)
+```
+
+```{r}
+str(train)
+```
+```{r}
+library(naniar)
+vis_miss(train, warn_large_data = FALSE)
+```
+Product categories 2 and 3 have a fair amount of null values. The rest of the data set seems fine.
+```{r}
+ggplot(data = train, aes(x = Purchase)) + 
+  geom_histogram(binwidth = 1000, color = "black", fill = "white") +
+  geom_density(col = "red") +
+  ggtitle("Distribution of Purchase") +
+  xlab("Purchase") + 
+  ylab("Frequency") +
+  scale_fill_manual(values=c("#F5A623", "#F5A623", "#F5A623"))
+```
+Outlier Correction 
+
+```{r}
+boxplot(train$Purchase)
+```
+```{r}
+#calculate the upper and lower limits for outlier detection
+purchase_mean <- mean(train$Purchase)
+purchase_sd <- sd(train$Purchase)
+upper_limit <- purchase_mean + 3*purchase_sd
+lower_limit <- purchase_mean - 3*purchase_sd
+
+# Replace outliers with the mean of the column
+train$Purchase[train$Purchase < lower_limit | train$Purchase > upper_limit] <- purchase_mean
+```
+
+#EDA
+```{r}
+library(gridExtra)
+col_names <- c("Gender","Age","City_Category","Marital_Status")
+# Initialize an empty list to store the plots
+plots <- list()
+# Iterate through the columns and create a pie chart for each one
+for (col in col_names) {
+    plots[[col]] <- ggplot(train, aes_string(x = col, fill = col)) + 
+    geom_bar(width = 1) +
+    coord_polar("y", start = 0) +
+    ggtitle(paste0("Distribution of ", col)) +
+    theme(legend.position = "none") +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+}
+# Use grid.arrange to combine the plots into one figure
+grid.arrange(grobs = plots, ncol = 3)
+```
+Data is fairly balanced in terms of Age and City but it seems to have excessive single males. 
+
+#EDA
+```{r}
+col_names <- c("Gender","Age","City_Category","Marital_Status")
+plots <- list()
+for (col in col_names) {
+    plots[[col]] <- ggplot(train, aes_string(x = col, y = "Purchase", fill = col)) +
+    geom_bar(stat = "identity") +
+    ggtitle(paste0("Cum Purch by ", col, " Category")) +
+    xlab(col) +
+    ylab("Cumulative Purchases")
+}
+grid.arrange(grobs = plots, ncol = 2)
+```
+Takeaways:
+1. Male customers contribute to most of the sales. On average, males spent more money
+2. 59% of customers are not married and 41% of customers are married. For spending, there are no any difference
+
+#Average ticket analysis 
+```{r}
+col_names <- c("Gender","Age","City_Category","Marital_Status","Stay_In_Current_City_Years")
+results <- data.frame()
+for (col in col_names) {
+    factors <- unique(train[,col])
+    for (factor in factors) {
+        filtered_data <- train[train[,col] == factor,]
+        avg_purchase <- mean(filtered_data$Purchase)
+        results <- rbind(results, data.frame(col = col, factor = factor, avg_purchase = avg_purchase))
+    }
+}
+split_df <- split(results, results$col)
+plots_list <- list()
+for (name in names(split_df)) {
+    df <- split_df[[name]]
+    p <- ggplot(df, aes(x = factor, y = avg_purchase)) +
+         geom_bar(stat = "identity", fill = avg_purchase, color = "black") +
+         ggtitle(name) + 
+         theme_minimal() + 
+         theme(plot.title = element_text(hjust = 0.5))+
+         ylab("Avg Purchase")+
+         xlab("Factor") +
+         theme(legend.position = "none")
+    plots_list[[name]] <- p
+}
+library(gridExtra)
+grid.arrange(grobs = plots_list, ncol = 3)
+
+```
+There is not much difference in the average buying behavior for each column. 
+1. Males spend a little bit more than women on average, combined with a larger number of men in the sample, this means that they are responsible for a majority of total purch
+
+#Making Predicitons using xGBoost
+
+```{r}
+library(xgboost)
+train_data <- train[,!(names(train) %in% c("User_ID", "Product_ID","Occupation"))]
+col_names = c("Gender","Age","City_Category","Marital_Status","Stay_In_Current_City_Years")
+train_data <- as.data.frame(cbind(train_data,model.matrix(~.-1, train_data[col_names])))
+train_data$Age <- as.numeric(as.character(train_data$Age))
+set.seed(123)
+split <- sample.split(train_data$Purchase, 0.7)
+train_data <- subset(train_data, split == TRUE)
+test_data <- subset(train_data, split == FALSE)
+train_data <- train_data[,!(names(train_data) %in% c("Gender","Age","City_Category","Marital_Status","Stay_In_Current_City_Years"))]
+test_data <- test_data[,!(names(test_data) %in% c("Gender","Age","City_Category","Marital_Status","Stay_In_Current_City_Years"))]
+# Train the model
+xgb_model <- xgboost(data = as.matrix(train_data[, -1]), label = train_data$Purchase, nrounds = 10)
+# Make predictions on test data
+predictions <- predict(xgb_model, as.matrix(test_data[, -1]))
+# Create a data frame for actual and predicted values
+pred_df <- data.frame(actual = test_data$Purchase, predicted = predictions)
+
+ggplot() + 
+  geom_density(aes(x=test_data$Purchase, fill='blue'),alpha = 0.5) + 
+  geom_density(aes(x=predictions, fill='red'), alpha = 0.5) + 
+  ggtitle("Actual vs Predicted Purchase") +
+  xlab("Purchase") +
+  ylab("Density")+
+  theme_light() +
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_fill_manual(name = "", labels = c("Actual", "Predicted"), values = c("blue", "red"))+
+  scale_x_continuous(limits=c(0,20000))
+```
